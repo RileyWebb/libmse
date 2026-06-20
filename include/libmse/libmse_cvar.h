@@ -11,6 +11,11 @@
 extern "C" {
 #endif
 
+typedef struct libmse_cvar_s libmse_cvar_t;
+
+typedef void (*libmse_cvar_iterate_cb)(libmse_cvar_t* cvar, void* user_data);
+typedef void (*libmse_cvar_change_cb)(libmse_cvar_t* cvar, void* user_data);
+
 typedef enum libmse_cvar_type_e {
     LIBMSE_CVAR_INT,
     LIBMSE_CVAR_FLOAT,
@@ -18,22 +23,26 @@ typedef enum libmse_cvar_type_e {
     LIBMSE_CVAR_STRING,
 } libmse_cvar_type_t;
 
-typedef struct {
+typedef struct libmse_cvar_s {
     const char* name;
     const char* description;
     libmse_cvar_type_t type;
+
     union {
         int *i;
         float *f;
         double *d;
         const char** s;
     } data;
-    char* alloc_s; // Safely stores dynamic strings set from console without freeing engine literals
+
+    char* alloc_s;
+
+    libmse_cvar_change_cb cb;
+    void* user_data;
 } libmse_cvar_t;
 
-typedef void (*libmse_cvar_iterate_cb)(libmse_cvar_t* cvar, void* user_data);
-
 LIBMSE_API bool libmse_cvar_register(const char* name, libmse_cvar_type_t type, void* ptr, const char* description);
+LIBMSE_API bool libmse_cvar_register_change_cb(const char* name, libmse_cvar_change_cb callback, void* user_data);
 LIBMSE_API bool libmse_cvar_destroy(const char* name);
 LIBMSE_API void libmse_cvar_iterate(libmse_cvar_iterate_cb callback, void* user_data);
 
@@ -49,6 +58,8 @@ LIBMSE_API bool libmse_cvar_set_i(const char* name, int value);
 LIBMSE_API bool libmse_cvar_set_f(const char* name, float value);
 LIBMSE_API bool libmse_cvar_set_d(const char* name, double value);
 LIBMSE_API bool libmse_cvar_set_s(const char* name, const char *value);
+
+LIBMSE_API bool libmse_cvar_export(const char* filename);
 
 #ifdef __cplusplus
 }

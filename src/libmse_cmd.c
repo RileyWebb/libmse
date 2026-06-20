@@ -8,11 +8,17 @@
 #include "libmse/libmse_cmd.h"
 
 #define CMD_INITIAL_CAPACITY 32
+#define ALIAS_INITIAL_CAPACITY 16
 
 static libmse_cmd_t **g_cmd_registry			= NULL;
 static size_t		  g_cmd_count				= 0;
 static size_t		  g_cmd_capacity			= 0;
 static bool			  g_cmd_defaults_registered = false;
+
+static libmse_alias_t **g_alias_registry			= NULL;
+static size_t			g_alias_count				= 0;
+static size_t			g_alias_capacity			= 0;
+static bool				g_alias_defaults_registered = false;
 
 static int find_cmd_index(const char *name)
 {
@@ -47,16 +53,7 @@ LIBMSE_API bool libmse_cmd_register(const libmse_cmd_t *cmd)
 	new_cmd->name				 = strdup(cmd->name);
 	new_cmd->description		 = cmd->description ? strdup(cmd->description) : NULL;
 	new_cmd->expected_args_count = cmd->expected_args_count;
-
-	if (cmd->expected_args_count > 0 && cmd->expected_types) {
-		libmse_cmd_type_t *types = (libmse_cmd_type_t *)malloc(cmd->expected_args_count * sizeof(libmse_cmd_type_t));
-		memcpy(types, cmd->expected_types, cmd->expected_args_count * sizeof(libmse_cmd_type_t));
-		new_cmd->expected_types = types;
-	} else {
-		new_cmd->expected_types = NULL;
-	}
-
-	new_cmd->handler = cmd->handler;
+	new_cmd->handler			 = cmd->handler;
 
 	g_cmd_registry[g_cmd_count++] = new_cmd;
 	return true;
@@ -70,7 +67,6 @@ LIBMSE_API bool libmse_cmd_destroy(const char *name)
 	libmse_cmd_t *cmd = g_cmd_registry[index];
 	free((void *)cmd->name);
 	if (cmd->description) free((void *)cmd->description);
-	if (cmd->expected_types) free((void *)cmd->expected_types);
 	free(cmd);
 
 	for (size_t i = (size_t)index; i < g_cmd_count - 1; i++) {
@@ -91,6 +87,8 @@ LIBMSE_API void libmse_cmd_iterate(libmse_cmd_iterate_cb callback, void *user_da
 
 LIBMSE_API libmse_cmd_t *libmse_cmd_get(const char *name)
 {
+	libmse_cmd_register_default();
+
 	int index = find_cmd_index(name);
 	if (index == -1) return NULL;
 	return g_cmd_registry[index];
@@ -108,18 +106,7 @@ static void list_cmd_callback(const libmse_cmd_t *cmd, void *user_data)
 	char output[256];
 	snprintf(output, sizeof(output), "  %-30s (", cmd->name);
 	for (size_t i = 0; i < cmd->expected_args_count; i++) {
-		libmse_cvar_type_t type		= cmd->expected_types[i];
-		const char		  *type_str = "Unknown";
-		if (type == LIBMSE_CVAR_INT) {
-			type_str = "Int";
-		} else if (type == LIBMSE_CVAR_DOUBLE) {
-			type_str = "Double";
-		} else if (type == LIBMSE_CVAR_FLOAT) {
-			type_str = "Float";
-		} else if (type == LIBMSE_CVAR_STRING) {
-			type_str = "String";
-		}
-		strncat(output, type_str, sizeof(output) - strlen(output) - 1);
+		strncat(output, "String", sizeof(output) - strlen(output) - 1);
 		if (i < cmd->expected_args_count - 1) strncat(output, ", ", sizeof(output) - strlen(output) - 1);
 	}
 
@@ -153,31 +140,56 @@ static void list_cvar_callback(libmse_cvar_t *cvar, void *user_data)
 	libmse_debug_printf(output);
 }
 
-static bool cmd_listcmds_handler(const libmse_cmd_arg_t *args)
+static bool cmd_listcmds_handler(int argc, const char **argv)
 {
+	(void)argc;
+	(void)argv;
 	libmse_debug_printf("Registered Commands:");
-	libmse_cmd_iterate(help_cmd_callback, NULL);
+	libmse_cmd_iterate(list_cmd_callback, NULL);
 	libmse_debug_printf("--- End of List ---");
 	return true;
 }
 
-static bool cmd_listvars_handler(const libmse_cmd_arg_t *args)
+static bool cmd_listvars_handler(int argc, const char **argv)
 {
+	(void)argc;
+	(void)argv;
 	libmse_debug_printf("Registered CVars:");
 	libmse_cvar_iterate(list_cvar_callback, NULL);
 	libmse_debug_printf("--- End of List ---");
 	return true;
 }
 
-static bool cmd_print_handler(const libmse_cmd_arg_t *args)
+static bool cmd_print_handler(int argc, const char **argv)
 {
-	libmse_debug_printf(args[0].s);
+	size_t total_len = 0;
+	for (int i = 0; i < argc; i++) {
+		total_len += strlen(argv[i]);
+		if (i < argc - 1) {
+			total_len += 1;
+		}
+	}
+
+	char *str = (char *)malloc(total_len + 1);
+	if (!str) return false;
+
+	str[0] = '\0';
+	for (int i = 0; i < argc; i++) {
+		strcat(str, argv[i]);
+		if (i < argc - 1) {
+			strcat(str, " ");
+		}
+	}
+
+	libmse_debug_printf(str);
+	free(str);
 	return true;
 }
 
-LIBMSE_API bool libmse_cmd_get_handler(const libmse_cmd_arg_t *args)
+LIBMSE_API bool libmse_cmd_get_handler(int argc, const char **argv)
 {
-	const char	  *name = args[0].s;
+	(void)argc;
+	const char	  *name = argv[0];
 	libmse_cvar_t *cvar = libmse_cvar_get(name);
 	if (!cvar) {
 		libmse_debug_printf("Error: CVar identifier target not found.");
@@ -203,15 +215,21 @@ LIBMSE_API bool libmse_cmd_get_handler(const libmse_cmd_arg_t *args)
 	return true;
 }
 
-LIBMSE_API bool libmse_cmd_set_handler(const libmse_cmd_arg_t *args)
+LIBMSE_API bool libmse_cmd_set_handler(int argc, const char **argv)
 {
-	const char *name	= args[0].s;
-	const char *val_str = args[1].s;
+	(void)argc;
+	const char *name	= argv[0];
+	const char *val_str = argv[1];
 
 	libmse_cvar_t *cvar = libmse_cvar_get(name);
 	if (!cvar) {
-		libmse_debug_printf("Error: CVar identifier target not found.");
-		return false;
+		libmse_cvar_register(name, LIBMSE_CVAR_STRING, val_str, "Dynamically created CVar (default string type)");
+		cvar = libmse_cvar_get(name);
+		if (!cvar) {
+			libmse_debug_printf("Error: Failed to create new CVar for assignment.");
+			return false;
+		}
+		return true;
 	}
 
 	bool sync_success = false;
@@ -241,51 +259,10 @@ LIBMSE_API bool libmse_cmd_set_handler(const libmse_cmd_arg_t *args)
 	return true;
 }
 
-static bool cmd_create_handler(const libmse_cmd_arg_t *args)
+static bool cmd_delete_handler(int argc, const char **argv)
 {
-	const char *type_str = args[0].s;
-	const char *name	 = args[1].s;
-	const char *val_str	 = args[2].s;
-
-	// Heap allocate backing variables so they aren't destroyed when this stack ends
-	void			  *ref = NULL;
-	libmse_cvar_type_t type;
-
-	if (strcmp(type_str, "int") == 0) {
-		type	 = LIBMSE_CVAR_INT;
-		int *val = malloc(sizeof(int));
-		*val	 = atoi(val_str);
-		ref		 = val;
-	} else if (strcmp(type_str, "float") == 0) {
-		type	   = LIBMSE_CVAR_FLOAT;
-		float *val = malloc(sizeof(float));
-		*val	   = (float)atof(val_str);
-		ref		   = val;
-	} else if (strcmp(type_str, "string") == 0) {
-		type			 = LIBMSE_CVAR_STRING;
-		const char **val = malloc(sizeof(const char *));
-		*val			 = strdup(val_str); // Needs to exist persistently
-		ref				 = val;
-	} else {
-		libmse_debug_printf("Error: Invalid type. Use 'int', 'float', or 'string'.");
-		return false;
-	}
-
-	if (libmse_cvar_register(name, type, ref, "Dynamically created via console")) {
-		char output[256];
-		snprintf(output, sizeof(output), "Created CVar '%s' successfully.", name);
-		libmse_debug_printf(output);
-		return true;
-	} else {
-		libmse_debug_printf("Error: Failed to register CVar (Already exists?).");
-		free(ref);
-		return false;
-	}
-}
-
-static bool cmd_delete_handler(const libmse_cmd_arg_t *args)
-{
-	const char *name = args[0].s;
+	(void)argc;
+	const char *name = argv[0];
 	if (libmse_cvar_destroy(name)) {
 		char output[256];
 		snprintf(output, sizeof(output), "Deleted CVar '%s' successfully.", name);
@@ -297,17 +274,20 @@ static bool cmd_delete_handler(const libmse_cmd_arg_t *args)
 	}
 }
 
-static bool cmd_help_handler(const libmse_cmd_arg_t *args)
+static bool cmd_help_handler(int argc, const char **argv)
 {
+	(void)argc;
+	(void)argv;
 	libmse_debug_printf("Available Commands:");
 	libmse_cmd_iterate(help_cmd_callback, NULL);
 	libmse_debug_printf("");
 	return true;
 }
 
-static bool cmd_exec_handler(const libmse_cmd_arg_t *args)
+static bool cmd_exec_handler(int argc, const char **argv)
 {
-	const char *filename = args[0].s;
+	(void)argc;
+	const char *filename = argv[0];
 	FILE	   *file	 = fopen(filename, "r");
 
 	if (!file) {
@@ -337,7 +317,6 @@ static bool cmd_exec_handler(const libmse_cmd_arg_t *args)
 			char output[256];
 			DEBUG_ERROR(output, sizeof(output), "Script Error: Failed at '%s' line %d: \"%s\"", filename, line_count,
 						line);
-			//libmse_debug_printf(output);
 		}
 	}
 
@@ -345,45 +324,202 @@ static bool cmd_exec_handler(const libmse_cmd_arg_t *args)
 	return true;
 }
 
+static bool cmd_create_handler(int argc, const char **argv)
+{
+	(void)argc;
+	const char		  *name		= argv[0];
+	const char		  *type_str = argv[1];
+	const char		  *desc		= argv[2];
+	libmse_cvar_type_t type;
+
+	if (strcmp(type_str, "int") == 0) {
+		type = LIBMSE_CVAR_INT;
+	} else if (strcmp(type_str, "float") == 0) {
+		type = LIBMSE_CVAR_FLOAT;
+	} else if (strcmp(type_str, "double") == 0) {
+		type = LIBMSE_CVAR_DOUBLE;
+	} else if (strcmp(type_str, "string") == 0) {
+		type = LIBMSE_CVAR_STRING;
+	} else {
+		libmse_debug_printf("Error: Invalid CVar type specified. Use int, float, double, or string.");
+		return false;
+	}
+
+	int			dummy_int	 = 0;
+	float		dummy_float	 = 0.0f;
+	double		dummy_double = 0.0;
+	const char *dummy_string = NULL;
+
+	void *ref = NULL;
+	switch (type) {
+	case LIBMSE_CVAR_INT:
+		ref = &dummy_int;
+		break;
+	case LIBMSE_CVAR_FLOAT:
+		ref = &dummy_float;
+		break;
+	case LIBMSE_CVAR_DOUBLE:
+		ref = &dummy_double;
+		break;
+	case LIBMSE_CVAR_STRING:
+		ref = &dummy_string;
+		break;
+	default:
+		libmse_debug_printf("Error: Unsupported CVar type.");
+		return false;
+	}
+
+	if (libmse_cvar_register(name, type, ref, desc)) {
+		char output[256];
+		snprintf(output, sizeof(output), "Created CVar '%s' of type '%s'.", name, type_str);
+		libmse_debug_printf(output);
+		return true;
+	} else {
+		libmse_debug_printf("Error: Failed to create CVar (Already exists?).");
+		return false;
+	}
+}
+
+/*LIBMSE_API libmse_alias_t *libmse_alias_get(const char *name)
+{
+	int index = -1;
+	if (!name || !g_alias_registry) return NULL;
+	for (size_t i = 0; i < g_alias_count; i++) {
+		if (g_alias_registry[i] && strcmp(g_alias_registry[i]->name, name) == 0) {
+			index = (int)i;
+			break;
+		}
+	}
+	if (index == -1) return NULL;
+	return g_alias_registry[index];
+}*/
+
+static bool cmd_alias_handler(int argc, const char **argv)
+{
+	if (argc < 2) {
+		libmse_debug_printf("Error: Missing arguments for alias.");
+		return false;
+	}
+
+	const char *alias_name = argv[0];
+
+	size_t total_len = 0;
+	for (int i = 1; i < argc; i++) {
+		total_len += strlen(argv[i]);
+		if (i < argc - 1) {
+			total_len += 1; // For the space between arguments
+		}
+	}
+
+	char *cmd_str = (char *)malloc(total_len + 1);
+	if (!cmd_str) return false;
+
+	cmd_str[0] = '\0'; // Start with an empty string
+	for (int i = 1; i < argc; i++) {
+		strcat(cmd_str, argv[i]);
+		if (i < argc - 1) {
+			strcat(cmd_str, " "); // Append space between args
+		}
+	}
+
+	if (libmse_cmd_get(alias_name) || libmse_cvar_get(alias_name)) {
+		libmse_debug_printf("Error: Alias name conflicts with existing command.");
+		free(cmd_str); // Don't leak the newly allocated string!
+		return false;
+	}
+
+	if (g_alias_count >= g_alias_capacity) {
+		size_t			 new_capacity = (g_alias_capacity == 0) ? ALIAS_INITIAL_CAPACITY : g_alias_capacity * 2;
+		libmse_alias_t **new_registry =
+			(libmse_alias_t **)realloc(g_alias_registry, new_capacity * sizeof(libmse_alias_t *));
+		if (!new_registry) {
+			free(cmd_str);
+			return false;
+		}
+
+		g_alias_registry = new_registry;
+		g_alias_capacity = new_capacity;
+	}
+
+	for (size_t i = 0; i < g_alias_count; i++) {
+		if (g_alias_registry[i] && strcmp(g_alias_registry[i]->name, alias_name) == 0) {
+			free((void *)g_alias_registry[i]->cmd);
+			// We can directly assign cmd_str here instead of strdup'ing again
+			g_alias_registry[i]->cmd = cmd_str;
+			return true;
+		}
+	}
+
+	libmse_alias_t *new_alias = (libmse_alias_t *)malloc(sizeof(libmse_alias_t));
+	if (!new_alias) {
+		free(cmd_str);
+		return false;
+	}
+
+	new_alias->name = strdup(alias_name);
+	new_alias->cmd	= cmd_str;
+
+	g_alias_registry[g_alias_count++] = new_alias;
+	return true;
+}
+
 LIBMSE_API void libmse_cmd_register_default()
 {
 	if (g_cmd_defaults_registered) return;
 
-	static const libmse_cmd_type_t arg_string_1[] = {LIBMSE_CMD_STRING};
-	static const libmse_cmd_type_t arg_string_2[] = {LIBMSE_CMD_STRING, LIBMSE_CMD_STRING};
-	static const libmse_cmd_type_t arg_string_3[] = {LIBMSE_CMD_STRING, LIBMSE_CMD_STRING, LIBMSE_CMD_STRING};
+	libmse_cmd_register(&(libmse_cmd_t){"help", "Lists all available commands", 0, cmd_help_handler});
+	libmse_cmd_register(&(libmse_cmd_t){"listvars", "Lists all registered CVars", 0, cmd_listvars_handler});
+	libmse_cmd_register(&(libmse_cmd_t){"listcmds", "Lists all registered Commands", 0, cmd_listcmds_handler});
 
-	libmse_cmd_register(&(libmse_cmd_t){"help", "Lists all available commands", 0, NULL, cmd_help_handler});
-	libmse_cmd_register(&(libmse_cmd_t){"listvars", "Lists all registered CVars", 0, NULL, cmd_listvars_handler});
-	libmse_cmd_register(&(libmse_cmd_t){"listcmds", "Lists all registered Commands", 0, NULL, cmd_listcmds_handler});
+	libmse_cmd_register(&(libmse_cmd_t){"print", "Prints the specified string", 1, cmd_print_handler});
+	libmse_cmd_register(&(libmse_cmd_t){"get", "Reads current CVar variant", 1, libmse_cmd_get_handler});
+	libmse_cmd_register(&(libmse_cmd_t){"delete", "Destroys a target CVar", 1, cmd_delete_handler});
 
-	libmse_cmd_register(&(libmse_cmd_t){"print", "Prints the specified string", 1, arg_string_1, cmd_print_handler});
-	libmse_cmd_register(&(libmse_cmd_t){"get", "Reads current CVar variant", 1, arg_string_1, libmse_cmd_get_handler});
-	libmse_cmd_register(&(libmse_cmd_t){"delete", "Destroys a target CVar", 1, arg_string_1, cmd_delete_handler});
+	libmse_cmd_register(&(libmse_cmd_t){"set", "Modifies target CVar allocation", 2, libmse_cmd_set_handler});
+	libmse_cmd_register(&(libmse_cmd_t){"create", "Registers a new CVar", 3, cmd_create_handler});
 
-	libmse_cmd_register(
-		&(libmse_cmd_t){"set", "Modifies target CVar allocation", 2, arg_string_2, libmse_cmd_set_handler});
-	libmse_cmd_register(&(libmse_cmd_t){"create", "Registers a new CVar", 3, arg_string_3, cmd_create_handler});
+	libmse_cmd_register(&(libmse_cmd_t){"exec", "Executes a script file", 1, cmd_exec_handler});
+	libmse_cmd_register(&(libmse_cmd_t){"alias", "Creates a new command alias", 2, cmd_alias_handler});
 
-	libmse_cmd_register(&(libmse_cmd_t){"exec", "Executes a script file", 1, arg_string_1, cmd_exec_handler});
+	g_cmd_defaults_registered = true;
 }
-
-#define LIBMSE_CMD_INPUT_BUFFER_SIZE 512
 
 LIBMSE_API bool libmse_cmd_parse(const char *input)
 {
-    char line_copy[LIBMSE_CMD_INPUT_BUFFER_SIZE];
+	char line_copy[LIBMSE_CMD_INPUT_BUFFER_SIZE];
 	strncpy(line_copy, input, sizeof(line_copy) - 1);
 	line_copy[sizeof(line_copy) - 1] = '\0';
 
-	char *args[16];
+	size_t		total_args = 0;
+	const char *count_p	   = line_copy;
+
+	while (*count_p) {
+		while (*count_p == ' ') count_p++;
+		if (!*count_p) break;
+
+		total_args++;
+
+		if (*count_p == '"') {
+			count_p++;
+			while (*count_p && *count_p != '"') count_p++;
+			if (*count_p == '"') count_p++;
+		} else {
+			while (*count_p && *count_p != ' ') count_p++;
+		}
+	}
+
+	if (total_args == 0) return false;
+
+	char **args = (char **)malloc(total_args * sizeof(char *));
+	if (!args) return false; // Out of memory
+
 	int	  argc = 0;
 	char *p	   = line_copy;
 
-	// Robust Tokenization (Supports "Spaces inside Quotes")
-	while (*p && argc < 16) {
+	while (*p && argc < total_args) {
 		while (*p == ' ') p++;
 		if (!*p) break;
+
 		if (*p == '"') {
 			p++;
 			args[argc++] = p;
@@ -402,37 +538,41 @@ LIBMSE_API bool libmse_cmd_parse(const char *input)
 		}
 	}
 
-	if (argc == 0) return false;
 	const char *cmd = args[0];
 
-	// 1. Check if input maps to a Registered Command
 	libmse_cmd_t *cmd_def = libmse_cmd_get(cmd);
 	if (cmd_def) {
 		if (!libmse_cmd_execute(cmd, argc - 1, (const char **)&args[1])) {
 			DEBUG_ERROR("Error: Command '%s' failed or expected %zu arguments.", cmd, cmd_def->expected_args_count);
-            return false;
-        }
+			return false;
+		}
 		return true;
 	}
 
-	// 2. Fallback check: Direct implicit CVar Get/Set (e.g. typing 'cl_fov 90')
 	libmse_cvar_t *cvar = libmse_cvar_get(cmd);
 	if (cvar) {
 		if (argc == 1) { // Get logic
-			libmse_cmd_get_handler(&(libmse_cmd_arg_t){.s = cmd});
-            return true;
+			const char *get_args[] = {cmd};
+			libmse_cmd_get_handler(1, get_args);
+			return true;
 		} else if (argc == 2) { // Set logic
-			libmse_cmd_arg_t set_args[2] = {{.s = cmd}, {.s = args[1]}};
-			libmse_cmd_set_handler(set_args);
-            return true;
+			const char *set_args[] = {cmd, args[1]};
+			libmse_cmd_set_handler(2, set_args);
+			return true;
 		} else {
 			DEBUG_ERROR("Usage: <cvar_name> [new_value]");
-            return false;
+			return false;
 		}
 	}
 
-    DEBUG_ERROR("Unknown command or CVar. Enter 'help' for instructions.");
-    return false;
+	for (size_t i = 0; i < g_alias_count; i++) {
+		if (g_alias_registry[i] && strcmp(g_alias_registry[i]->name, input) == 0) {
+			return libmse_cmd_parse(g_alias_registry[i]->cmd);
+		}
+	}
+
+	DEBUG_ERROR("Unknown command or CVar. Enter 'help' for instructions.");
+	return false;
 }
 
 LIBMSE_API bool libmse_cmd_execute(const char *name, int argc, const char **argv)
@@ -442,25 +582,5 @@ LIBMSE_API bool libmse_cmd_execute(const char *name, int argc, const char **argv
 
 	if ((size_t)argc < cmd->expected_args_count) return false;
 
-	libmse_cmd_arg_t parsed_args[16];
-	size_t			 limit = cmd->expected_args_count > 16 ? 16 : cmd->expected_args_count;
-
-	for (size_t i = 0; i < limit; i++) {
-		switch (cmd->expected_types[i]) {
-		case LIBMSE_CMD_INT:
-			parsed_args[i].i = atoi(argv[i]);
-			break;
-		case LIBMSE_CMD_FLOAT:
-			parsed_args[i].f = (float)atof(argv[i]);
-			break;
-		case LIBMSE_CMD_DOUBLE:
-			parsed_args[i].d = atof(argv[i]);
-			break;
-		case LIBMSE_CMD_STRING:
-			parsed_args[i].s = argv[i];
-			break;
-		}
-	}
-
-	return cmd->handler((cmd->expected_args_count > 0) ? parsed_args : NULL);
+	return cmd->handler(argc, argv);
 }
