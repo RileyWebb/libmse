@@ -1,3 +1,5 @@
+// libmse_cvar.h - CVar (Console Variable) API for libmse
+
 #ifndef LIBMSE_CVAR_H
 #define LIBMSE_CVAR_H
 
@@ -60,6 +62,9 @@ LIBMSE_API bool libmse_cvar_set_d(const char* name, double value);
 LIBMSE_API bool libmse_cvar_set_s(const char* name, const char *value);
 
 LIBMSE_API bool libmse_cvar_export(const char* filename);
+
+LIBMSE_API void* libmse_get_cvar_registry();
+LIBMSE_API size_t libmse_get_cvar_count();
 
 #ifdef __cplusplus
 }

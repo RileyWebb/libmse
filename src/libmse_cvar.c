@@ -10,7 +10,6 @@ static libmse_cvar_t **g_cvar_registry = NULL;
 static size_t		   g_cvar_count	   = 0;
 static size_t		   g_cvar_capacity = 0;
 
-// Helper functions to find indices
 static int find_cvar_index(const char *name)
 {
 	if (!name || !g_cvar_registry) return -1;
@@ -343,3 +342,6 @@ LIBMSE_API bool libmse_cvar_register_change_cb(const char *name, libmse_cvar_cha
 	cvar->user_data = user_data;
 	return true;
 }
+
+LIBMSE_API void* libmse_get_cvar_registry() { return (void*)g_cvar_registry; }
+LIBMSE_API size_t libmse_get_cvar_count()   { return g_cvar_count; }

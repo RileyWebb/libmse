@@ -1,3 +1,5 @@
+//TODO: MOVE TO PTHREAD
+
 #include "libmse/libmse_sync.h"
 #include <SDL3/SDL.h>
 #include <stdlib.h>

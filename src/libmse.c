@@ -1,12 +1,16 @@
 #include "libmse/libmse.h"
+#include "libmse/libmse_profiler.h"
 
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #include "compat/unzip.h"
+#include "libmse/libmse_resource.h"
+#include "libmse/libmse_log.h"
 
 #if defined(_WIN32)
 #include <direct.h>
@@ -23,15 +27,21 @@
 #define MSE_PATH_BUFFER 1024
 #define MSE_COPY_BUFFER 8192
 
+FILE *libmse_log_file;
+
+LIBMSE_API libmse_db_t *g_temp_db = NULL;
+LIBMSE_API libmse_library_t *g_temp_lib = NULL;
+
 typedef struct mse_backend_record_s {
-	mse_backend_t backend;
-	void *library_handle;
+	libmse_backend_t				 backend;
+	void						*library_handle;
 	struct mse_backend_record_s *next;
 } mse_backend_record_t;
 
 static mse_backend_record_t *g_backends = NULL;
 
-static bool mse_path_exists(const char *path) {
+static bool mse_path_exists(const char *path)
+{
 	struct stat path_stat;
 
 	if (path == NULL) {
@@ -41,7 +51,8 @@ static bool mse_path_exists(const char *path) {
 	return stat(path, &path_stat) == 0;
 }
 
-static bool mse_path_is_directory(const char *path) {
+static bool mse_path_is_directory(const char *path)
+{
 	struct stat path_stat;
 
 	if (path == NULL) {
@@ -59,7 +70,8 @@ static bool mse_path_is_directory(const char *path) {
 #endif
 }
 
-static bool mse_mkdir_single(const char *path) {
+static bool mse_mkdir_single(const char *path)
+{
 	if (path == NULL || *path == '\0') {
 		return false;
 	}
@@ -77,8 +89,9 @@ static bool mse_mkdir_single(const char *path) {
 	return false;
 }
 
-static bool mse_make_directory_recursive(const char *path) {
-	char buffer[MSE_PATH_BUFFER];
+static bool mse_make_directory_recursive(const char *path)
+{
+	char   buffer[MSE_PATH_BUFFER];
 	size_t index;
 	size_t length;
 	size_t start_index;
@@ -97,7 +110,7 @@ static bool mse_make_directory_recursive(const char *path) {
 
 	for (index = start_index; buffer[index] != '\0'; ++index) {
 		if (buffer[index] == '/' || buffer[index] == '\\') {
-			char saved = buffer[index];
+			char saved	  = buffer[index];
 			buffer[index] = '\0';
 			if (!mse_mkdir_single(buffer)) {
 				buffer[index] = saved;
@@ -110,7 +123,8 @@ static bool mse_make_directory_recursive(const char *path) {
 	return mse_mkdir_single(buffer);
 }
 
-static bool mse_path_join(char *out, size_t out_size, const char *left, const char *right) {
+static bool mse_path_join(char *out, size_t out_size, const char *left, const char *right)
+{
 	size_t left_length;
 	size_t right_length;
 
@@ -135,7 +149,8 @@ static bool mse_path_join(char *out, size_t out_size, const char *left, const ch
 	return true;
 }
 
-static bool mse_is_safe_relative_path(const char *path) {
+static bool mse_is_safe_relative_path(const char *path)
+{
 	const char *cursor;
 
 	if (path == NULL || *path == '\0') {
@@ -153,7 +168,7 @@ static bool mse_is_safe_relative_path(const char *path) {
 	cursor = path;
 	while (*cursor != '\0') {
 		const char *segment_start = cursor;
-		size_t segment_length;
+		size_t		segment_length;
 
 		while (*cursor != '\0' && *cursor != '/' && *cursor != '\\') {
 			++cursor;
@@ -172,9 +187,9 @@ static bool mse_is_safe_relative_path(const char *path) {
 	return true;
 }
 
-static void *mse_library_open(const char *path) {
-	if (path == NULL)
-		return NULL;
+static void *mse_library_open(const char *path)
+{
+	if (path == NULL) return NULL;
 
 #if defined(_WIN32)
 	return (void *)LoadLibraryA(path);
@@ -183,7 +198,8 @@ static void *mse_library_open(const char *path) {
 #endif
 }
 
-static void mse_library_close(void *handle) {
+static void mse_library_close(void *handle)
+{
 	if (handle == NULL) {
 		return;
 	}
@@ -195,7 +211,8 @@ static void mse_library_close(void *handle) {
 #endif
 }
 
-static void *mse_library_symbol(void *handle, const char *symbol) {
+static void *mse_library_symbol(void *handle, const char *symbol)
+{
 	if (handle == NULL || symbol == NULL) {
 		return NULL;
 	}
@@ -207,7 +224,8 @@ static void *mse_library_symbol(void *handle, const char *symbol) {
 #endif
 }
 
-static bool mse_create_temp_directory(char *out, size_t out_size) {
+static bool mse_create_temp_directory(char *out, size_t out_size)
+{
 	if (out == NULL || out_size == 0U) {
 		return false;
 	}
@@ -221,8 +239,9 @@ static bool mse_create_temp_directory(char *out, size_t out_size) {
 
 	for (unsigned int attempt = 0U; attempt < 128U; ++attempt) {
 		ULONGLONG tick = GetTickCount64();
-		DWORD pid = GetCurrentProcessId();
-		if (snprintf(out, out_size, "%s/mse_backend_%lu_%llu_%u", temp_path, (unsigned long)pid, (unsigned long long)tick, attempt) < 0) {
+		DWORD	  pid  = GetCurrentProcessId();
+		if (snprintf(out, out_size, "%s/mse_backend_%lu_%llu_%u", temp_path, (unsigned long)pid,
+					 (unsigned long long)tick, attempt) < 0) {
 			return false;
 		}
 
@@ -233,8 +252,8 @@ static bool mse_create_temp_directory(char *out, size_t out_size) {
 
 	return false;
 #else
-	char template_buffer[MSE_PATH_BUFFER];
-	char *result;
+	char   template_buffer[MSE_PATH_BUFFER];
+	char  *result;
 	size_t length;
 
 	if (snprintf(template_buffer, sizeof(template_buffer), "/tmp/mse_backend_XXXXXX") < 0) {
@@ -256,14 +275,15 @@ static bool mse_create_temp_directory(char *out, size_t out_size) {
 #endif
 }
 
-static bool mse_extract_zip_entry(unzFile archive, const char *entry_name, const char *destination_root) {
-	char normalized_name[MSE_PATH_BUFFER];
-	char destination_path[MSE_PATH_BUFFER];
-	char *last_separator;
-	FILE *output = NULL;
-	int read_bytes;
+static bool mse_extract_zip_entry(unzFile archive, const char *entry_name, const char *destination_root)
+{
+	char   normalized_name[MSE_PATH_BUFFER];
+	char   destination_path[MSE_PATH_BUFFER];
+	char  *last_separator;
+	FILE  *output = NULL;
+	int	   read_bytes;
 	size_t entry_length;
-	char buffer[MSE_COPY_BUFFER];
+	char   buffer[MSE_COPY_BUFFER];
 
 	if (archive == NULL || entry_name == NULL || destination_root == NULL) {
 		return false;
@@ -326,9 +346,10 @@ static bool mse_extract_zip_entry(unzFile archive, const char *entry_name, const
 	return read_bytes == 0;
 }
 
-static bool mse_extract_zip_archive(const char *zip_path, char *out_root, size_t out_root_size) {
+static bool mse_extract_zip_archive(const char *zip_path, char *out_root, size_t out_root_size)
+{
 	unzFile archive;
-	int unzip_status;
+	int		unzip_status;
 
 	if (zip_path == NULL || out_root == NULL) {
 		return false;
@@ -350,13 +371,14 @@ static bool mse_extract_zip_archive(const char *zip_path, char *out_root, size_t
 	}
 
 	while (unzip_status == UNZ_OK) {
-		char entry_name[MSE_PATH_BUFFER];
+		char			entry_name[MSE_PATH_BUFFER];
 		unz_file_info64 file_info;
 
 		memset(&file_info, 0, sizeof(file_info));
 		memset(entry_name, 0, sizeof(entry_name));
 
-		if (unzGetCurrentFileInfo64(archive, &file_info, entry_name, (unsigned long)sizeof(entry_name), NULL, 0U, NULL, 0U) != UNZ_OK) {
+		if (unzGetCurrentFileInfo64(archive, &file_info, entry_name, (unsigned long)sizeof(entry_name), NULL, 0U, NULL,
+									0U) != UNZ_OK) {
 			unzClose(archive);
 			return false;
 		}
@@ -373,18 +395,19 @@ static bool mse_extract_zip_archive(const char *zip_path, char *out_root, size_t
 	return true;
 }
 
-static bool mse_backend_load_info(void *library_handle, mse_backend_t *backend) {
-	const mse_backend_info_t *info = NULL;
-	const mse_backend_source_t *source = NULL;
-	const mse_backend_caps_e *capabilities = NULL;
-	mse_backend_start_callback_t start = NULL;
-	mse_backend_get_texture_callback_t get_texture = NULL;
-	const mse_backend_input_desc_t *inputs = NULL;
-	const size_t *input_count = NULL;
-	mse_backend_init_callback_t init = NULL;
-	mse_backend_shutdown_callback_t shutdown = NULL;
-	mse_backend_load_rom_callback_t load_rom = NULL;
+static bool mse_backend_load_info(void *library_handle, libmse_backend_t *backend)
+{
+	const mse_backend_info_t	*info		  = NULL;
+	const mse_backend_source_t	*source		  = NULL;
+	mse_backend_start_callback_t start		  = NULL;
+	mse_backend_frame_callback_t get_frame	  = NULL;
+	const mse_backend_input_desc_t		*inputs		   = NULL;
+	const size_t						*input_count   = NULL;
+	mse_backend_init_callback_t			 init		   = NULL;
+	mse_backend_shutdown_callback_t		 shutdown	   = NULL;
+	mse_backend_load_rom_callback_t		 load_rom	   = NULL;
 	mse_backend_update_inputs_callback_t update_inputs = NULL;
+	libmse_library_meta_handler_t		 library_meta_handler = NULL;
 
 	if (library_handle == NULL || backend == NULL) {
 		return false;
@@ -401,16 +424,16 @@ static bool mse_backend_load_info(void *library_handle, mse_backend_t *backend) 
 		return false;
 	}
 
-	source = (const mse_backend_source_t *)mse_library_symbol(library_handle, "source");
-	capabilities = (const mse_backend_caps_e *)mse_library_symbol(library_handle, "capabilities");
-	start = (mse_backend_start_callback_t)mse_library_symbol(library_handle, "start");
+	source		 = (const mse_backend_source_t *)mse_library_symbol(library_handle, "source");
+	start		 = (mse_backend_start_callback_t)mse_library_symbol(library_handle, "start");
 	if (start == NULL) {
 		start = (mse_backend_start_callback_t)mse_library_symbol(library_handle, "backend_start");
 	}
 
-	get_texture = (mse_backend_get_texture_callback_t)mse_library_symbol(library_handle, "get_texture");
-	if (get_texture == NULL) {
-		get_texture = (mse_backend_get_texture_callback_t)mse_library_symbol(library_handle, "backend_get_texture");
+	/* Video output (optional): backends that render publish CPU pixels here. */
+	get_frame = (mse_backend_frame_callback_t)mse_library_symbol(library_handle, "get_frame");
+	if (get_frame == NULL) {
+		get_frame = (mse_backend_frame_callback_t)mse_library_symbol(library_handle, "backend_get_frame");
 	}
 
 	/* Input control scheme (optional) */
@@ -440,13 +463,20 @@ static bool mse_backend_load_info(void *library_handle, mse_backend_t *backend) 
 
 	update_inputs = (mse_backend_update_inputs_callback_t)mse_library_symbol(library_handle, "update_inputs");
 	if (update_inputs == NULL) {
-		update_inputs = (mse_backend_update_inputs_callback_t)mse_library_symbol(library_handle, "backend_update_inputs");
+		update_inputs =
+			(mse_backend_update_inputs_callback_t)mse_library_symbol(library_handle, "backend_update_inputs");
 	}
 
-	backend->info = *info;
+	library_meta_handler = (libmse_library_meta_handler_t)mse_library_symbol(library_handle, "library_meta_handler");
+	if (library_meta_handler == NULL) {
+		library_meta_handler =
+			(libmse_library_meta_handler_t)mse_library_symbol(library_handle, "backend_library_meta_handler");
+	}
+
+	backend->info			   = *info;
 	backend->source.repository = info->repository;
-	backend->source.commit = NULL;
-	backend->source.branch = NULL;
+	backend->source.commit	   = NULL;
+	backend->source.branch	   = NULL;
 
 	if (source != NULL) {
 		if (source->repository != NULL) {
@@ -456,38 +486,134 @@ static bool mse_backend_load_info(void *library_handle, mse_backend_t *backend) 
 		backend->source.branch = source->branch;
 	}
 
-	backend->capabilities = capabilities != NULL ? *capabilities : MSE_BACKEND_CAPS_NONE;
-	backend->start = start;
-	backend->get_texture = get_texture;
-	backend->init = init;
-	backend->shutdown = shutdown;
-	backend->load_rom = load_rom;
+	/* Optional: Lua scripts the backend ships, for UI it defines itself. The
+	 * frontend loads these into its UI Lua state; a backend without them simply
+	 * contributes no panels. */
+	const char **lua_libraries = (const char **)mse_library_symbol(library_handle, "lua_libraries");
+	const size_t *lua_library_count =
+		(const size_t *)mse_library_symbol(library_handle, "lua_library_count");
+
+	backend->lua_libraries	   = lua_libraries;
+	backend->lua_library_count = (lua_libraries != NULL && lua_library_count != NULL)
+	                                 ? *lua_library_count
+	                                 : 0;
+
+	backend->start		  = start;
+	backend->get_frame	  = get_frame;
+	backend->init		   = init;
+	backend->shutdown	   = shutdown;
+	backend->load_rom	   = load_rom;
 	backend->update_inputs = update_inputs;
+	backend->metadata_handler = library_meta_handler;
 
 	/* Register any exported file handlers provided by the backend plugin */
-	const mse_file_handler_t *handlers = (const mse_file_handler_t *)mse_library_symbol(library_handle, "mse_file_handlers");
+	const mse_file_handler_t *handlers =
+		(const mse_file_handler_t *)mse_library_symbol(library_handle, "mse_file_handlers");
 	if (handlers != NULL) {
 		for (size_t i = 0; handlers[i].extension != NULL; ++i) {
-			mse_filetype_register(handlers[i].extension, &handlers[i]);
+			//mse_filetype_register(handlers[i].extension, &handlers[i]);
 		}
 	}
 
 	/* Wire up the input control scheme */
 	if (inputs != NULL && input_count != NULL && *input_count > 0U) {
-		backend->input_descs = inputs;
-		backend->input_count = *input_count;
+		backend->input_descs  = inputs;
+		backend->input_count  = *input_count;
 		backend->input_states = (float *)calloc(backend->input_count, sizeof(float));
 		/* Non-fatal: if allocation fails inputs just won't work */
 	} else {
-		backend->input_descs = NULL;
-		backend->input_count = 0U;
+		backend->input_descs  = NULL;
+		backend->input_count  = 0U;
 		backend->input_states = NULL;
 	}
+
+
+
+	//if (!g_temp_db) {
+		g_temp_db = libmse_db_open("mse_library.db");
+		if (g_temp_db) {
+			const char* create_sql = 
+                "-- 1. Companies (e.g., Nintendo)\n"
+                "CREATE TABLE IF NOT EXISTS companies ("
+                "   id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "   playmatch_id TEXT UNIQUE, "
+                "   name TEXT"
+                ");"
+
+                "-- 2. Platforms (e.g., NES)\n"
+                "CREATE TABLE IF NOT EXISTS platforms ("
+                "   id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "   playmatch_id TEXT UNIQUE, "
+                "   name TEXT, "
+                "   company_id INTEGER, "
+                "   FOREIGN KEY(company_id) REFERENCES companies(id)"
+                ");"
+
+                "-- 3. Core Games\n"
+                "CREATE TABLE IF NOT EXISTS games ("
+                "   id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "   playmatch_id TEXT UNIQUE, "
+                "   name TEXT, "
+                "   description TEXT, "
+                "   platform_id INTEGER, "
+                "   clone_of TEXT, "
+                "   release_year INTEGER, "
+                "   artwork_blob BLOB, "
+                "   FOREIGN KEY(platform_id) REFERENCES platforms(id)"
+                ");"
+
+                "-- 4. Physical Game Files (ROMs)\n"
+                "CREATE TABLE IF NOT EXISTS game_files ("
+                "   id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "   game_id INTEGER, "
+                "   playmatch_id TEXT UNIQUE, "
+                "   rom_path TEXT UNIQUE, "
+                "   file_name TEXT, "
+                "   file_size INTEGER, "
+                "   crc TEXT, "
+                "   md5 TEXT, "
+                "   sha1 TEXT, "
+                "   sha256 TEXT, "
+                "   status TEXT, "
+                "   FOREIGN KEY(game_id) REFERENCES games(id)"
+                ");"
+
+                "-- 5. External Metadata Mappings (IGDB, ScreenScraper, etc.)\n"
+                "CREATE TABLE IF NOT EXISTS external_metadata ("
+                "   game_id INTEGER, "
+                "   provider_name TEXT, "
+                "   provider_id TEXT, "
+                "   match_type TEXT, "
+                "   match_reason TEXT, "
+                "   UNIQUE(game_id, provider_name), "
+                "   FOREIGN KEY(game_id) REFERENCES games(id)"
+                ");"
+
+                "-- 6. Audit & Verification Data (DATs & Signature Groups)\n"
+                "CREATE TABLE IF NOT EXISTS verification_data ("
+                "   game_id INTEGER UNIQUE, "
+                "   signature_group_name TEXT, "
+                "   dat_file_name TEXT, "
+                "   dat_version TEXT, "
+                "   FOREIGN KEY(game_id) REFERENCES games(id)"
+                ");";
+			libmse_db_exec(create_sql, g_temp_db);
+			
+			g_temp_lib = libmse_library_create(g_temp_db);
+			//libmse_library_register_handler(g_temp_lib, "nes", library_meta_handler, NULL);
+			
+			//libmse_lua_worker_t *worker = libmse_lua_get_default_worker();
+			//if (worker) {
+			//	libmse_lua_worker_execute_script(worker, "matcher.lua");
+			//}
+		}
+	//}
 
 	return true;
 }
 
-static mse_backend_t *mse_backend_register_loaded(void *library_handle) {
+static libmse_backend_t *mse_backend_register_loaded(void *library_handle)
+{
 	mse_backend_record_t *record;
 
 	record = (mse_backend_record_t *)calloc(1, sizeof(mse_backend_record_t));
@@ -505,12 +631,13 @@ static mse_backend_t *mse_backend_register_loaded(void *library_handle) {
 	}
 
 	record->next = g_backends;
-	g_backends = record;
+	g_backends	 = record;
 
 	return &record->backend;
 }
 
-static bool mse_backend_resolve_library_path(char *out, size_t out_size, const char *root) {
+static bool mse_backend_resolve_library_path(char *out, size_t out_size, const char *root)
+{
 	char lib_dir[MSE_PATH_BUFFER];
 	char platform_dir[MSE_PATH_BUFFER];
 	char library_name[MSE_PATH_BUFFER];
@@ -519,7 +646,7 @@ static bool mse_backend_resolve_library_path(char *out, size_t out_size, const c
 		return false;
 	}
 
-	if (!mse_path_join(platform_dir, sizeof(platform_dir), lib_dir, MSE_PLATFORM_FOLDER)) {
+	if (!mse_path_join(platform_dir, sizeof(platform_dir), lib_dir, MSE_PLATFORM_NAME)) {
 		return false;
 	}
 
@@ -530,8 +657,9 @@ static bool mse_backend_resolve_library_path(char *out, size_t out_size, const c
 	return mse_path_join(out, out_size, platform_dir, library_name);
 }
 
-static mse_backend_t *mse_backend_register_from_root(const char *root) {
-	char library_path[MSE_PATH_BUFFER];
+static libmse_backend_t *mse_backend_register_from_root(const char *root)
+{
+	char  library_path[MSE_PATH_BUFFER];
 	void *library_handle;
 
 	if (root == NULL) {
@@ -554,7 +682,8 @@ static mse_backend_t *mse_backend_register_from_root(const char *root) {
 	return mse_backend_register_loaded(library_handle);
 }
 
-static mse_backend_t *mse_backend_register_from_zip(const char *zip_path) {
+static libmse_backend_t *mse_backend_register_from_zip(const char *zip_path)
+{
 	char extracted_root[MSE_PATH_BUFFER];
 
 	if (!mse_extract_zip_archive(zip_path, extracted_root, sizeof(extracted_root))) {
@@ -564,7 +693,8 @@ static mse_backend_t *mse_backend_register_from_zip(const char *zip_path) {
 	return mse_backend_register_from_root(extracted_root);
 }
 
-static mse_backend_t *mse_backend_register_path(const char *path) {
+static libmse_backend_t *mse_backend_register_path(const char *path)
+{
 	if (path == NULL) {
 		return NULL;
 	}
@@ -580,17 +710,19 @@ static mse_backend_t *mse_backend_register_path(const char *path) {
 	return mse_backend_register_from_zip(path);
 }
 
-LIBMSE_API mse_backend_t *mse_backend_register(const char *filename) {
+LIBMSE_API libmse_backend_t *mse_backend_register(const char *filename)
+{
 	return mse_backend_register_path(filename);
 }
 
-LIBMSE_API mse_backend_t *mse_backend_register_folder(const char *foldername) {
+LIBMSE_API libmse_backend_t *mse_backend_register_folder(const char *foldername)
+{
 	return mse_backend_register_path(foldername);
 }
 
-LIBMSE_API bool mse_backend_init(mse_backend_t *backend) {
-	if (backend == NULL || backend->init == NULL)
-		return true;
+LIBMSE_API bool mse_backend_init(libmse_backend_t *backend)
+{
+	if (backend == NULL || backend->init == NULL) return true;
 
 	libmse_cmd_register_default();
 	//libmse_cvar_register_default();
@@ -598,23 +730,65 @@ LIBMSE_API bool mse_backend_init(mse_backend_t *backend) {
 	return backend->init();
 }
 
-LIBMSE_API void mse_backend_shutdown(mse_backend_t *backend) {
+LIBMSE_API void mse_backend_shutdown(libmse_backend_t *backend)
+{
 	if (backend == NULL || backend->shutdown == NULL) {
 		return; // Optional callback
 	}
 	backend->shutdown();
 }
 
-LIBMSE_API bool mse_backend_load_rom(mse_backend_t *backend, const uint8_t *data, size_t size) {
+LIBMSE_API bool mse_backend_load_rom(libmse_backend_t *backend, const uint8_t *data, size_t size)
+{
 	if (backend == NULL || backend->load_rom == NULL) {
 		return false; // Cannot load ROM without callback
 	}
 	return backend->load_rom(data, size);
 }
 
-LIBMSE_API void mse_backend_update_inputs(mse_backend_t *backend, const float *inputs) {
+LIBMSE_API bool mse_backend_get_frame(libmse_backend_t *backend, mse_frame_t *frame)
+{
+	if (backend == NULL || backend->get_frame == NULL || frame == NULL) {
+		return false;
+	}
+
+	return backend->get_frame(frame);
+}
+
+LIBMSE_API void mse_backend_update_inputs(libmse_backend_t *backend, const float *inputs)
+{
 	if (backend == NULL || backend->update_inputs == NULL) {
 		return;
 	}
 	backend->update_inputs(inputs);
+}
+
+LIBMSE_API bool libmse_init(void)
+{
+	libmse_resource_ensure_directory_exists(libmse_resource_get_appdata_path());
+
+    //libmse_log_register_file(stdout, true,
+    //    #ifdef DEBUG
+    //        true 
+    //    #else
+    //        true //false
+    //    #endif
+    //);
+
+	libmse_profiler_init();
+
+	libmse_log_file = libmse_resource_create_log_file();
+    libmse_log_register_file(libmse_log_file, false, false);
+
+	libmse_lua_init();
+	libmse_lua_register_include_dir(libmse_lua_get_default_worker()->L, "cnes/data/lua");
+	return true;
+}
+
+LIBMSE_API void libmse_shutdown(void)
+{
+	libmse_lua_shutdown();
+
+	libmse_log_flush_all();
+	fclose(libmse_log_file);
 }
