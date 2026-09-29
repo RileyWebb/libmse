@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -20,7 +21,14 @@
 #define LIBMSE_PATH_SEPARATOR '/'
 #endif
 
-//#define PATH_MAX 1024
+// limits.h above is where PATH_MAX comes from, and MinGW happens to pull it in
+// through the Windows headers as well -- which is why this file built on
+// Windows for months while every Linux build of it failed to compile. POSIX
+// allows PATH_MAX to be left undefined where the limit is not fixed, so there
+// is still a fallback for it.
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 #define SHA256_STRING_LENGTH 65 // 64 chars + null terminator
 #define CRC32_STRING_LENGTH 9   // 8 chars + null terminator
