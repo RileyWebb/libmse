@@ -6,6 +6,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 include(cmake/OpenSSL.cmake)
 include(cmake/LuaDeps.cmake)
+include(cmake/Curl.cmake)
 include(cmake/MinizipNG.cmake)
 include(cmake/SQLite3.cmake)
 include(cmake/STB.cmake)
@@ -58,4 +59,16 @@ add_custom_target(libmse_copy_data
     ${CMAKE_CURRENT_SOURCE_DIR}/data/
     ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/data/)
 
-add_dependencies(libmse libmse_copy_data socket_core mime_core)
+add_dependencies(libmse libmse_copy_data socket_core mime_core lcurl_core)
+
+# The cvar system's declared half has no visible failure mode: a declaration
+# that never queues, a flush that never repoints, and a cvar that was never
+# written all look identical from the outside. This exercises each of them.
+add_executable(libmse_cvar_test tests/cvar_test.c)
+target_link_libraries(libmse_cvar_test PRIVATE libmse)
+
+add_test(NAME libmse_cvars COMMAND libmse_cvar_test)
+set_tests_properties(libmse_cvars PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
+    TIMEOUT 30
+    LABELS "libmse;cvar")

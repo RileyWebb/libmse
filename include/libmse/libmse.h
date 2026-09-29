@@ -69,11 +69,22 @@ typedef struct mse_backend_s {
     mse_backend_load_rom_callback_t load_rom;
     mse_backend_update_inputs_callback_t update_inputs;
 
+    /* Transport control; required, see libmse_backend.h. */
+    mse_backend_pause_callback_t pause;
+    mse_backend_resume_callback_t resume;
+    mse_backend_stop_callback_t stop;
+    mse_backend_state_callback_t get_state;
+
     libmse_library_meta_handler_t metadata_handler;
 
     /* Input control scheme declared by the backend */
     const mse_backend_input_desc_t *input_descs;
     size_t input_count;
+
+    /* Optional: how the backend's pad is laid out, for the configurator.
+     * input_layouts runs parallel to input_descs when present. */
+    const mse_backend_input_layout_t *input_layouts;
+    const mse_backend_controller_desc_t *controller_desc;
 
     /* Live input state written by the frontend input thread. */
     float *input_states;
@@ -103,6 +114,14 @@ LIBMSE_API bool mse_backend_init(libmse_backend_t *backend);
 LIBMSE_API void mse_backend_shutdown(libmse_backend_t *backend);
 LIBMSE_API bool mse_backend_load_rom(libmse_backend_t *backend, const uint8_t *data, size_t size);
 LIBMSE_API void mse_backend_update_inputs(libmse_backend_t *backend, const float *inputs);
+
+// Transport control. Each returns false only when the backend is missing --
+// the callbacks themselves are required, so there is no "unsupported" case.
+LIBMSE_API bool mse_backend_pause(libmse_backend_t *backend);
+LIBMSE_API bool mse_backend_resume(libmse_backend_t *backend);
+LIBMSE_API bool mse_backend_stop(libmse_backend_t *backend);
+LIBMSE_API libmse_backend_state_t mse_backend_get_state(const libmse_backend_t *backend);
+LIBMSE_API const char *mse_backend_state_name(libmse_backend_state_t state);
 
 // Convenience wrapper around backend->get_frame. Returns false when the backend
 // publishes no video or has not produced a frame yet.

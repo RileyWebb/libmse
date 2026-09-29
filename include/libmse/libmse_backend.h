@@ -38,6 +38,28 @@ typedef struct mse_backend_resources_s {
     size_t shader_count;
 } mse_backend_resources_t;
 
+// What a backend is doing right now. Every backend reports one of these, and
+// the frontend drives the transitions between them.
+typedef enum libmse_backend_state_e {
+    LIBMSE_BACKEND_STOPPED = 0, // no content loaded, or it was stopped
+    LIBMSE_BACKEND_RUNNING,
+    LIBMSE_BACKEND_PAUSED
+} libmse_backend_state_t;
+
+// Transport control. Required of every backend: a plugin that does not export
+// all four is refused at registration, because a frontend that cannot pause an
+// emulator cannot offer the controls that every emulator is expected to have.
+//
+// These are called from the UI thread while the emulation thread is running,
+// so a backend signals its loop (atomics, an event) rather than blocking here.
+// Every one of them is idempotent: pausing a paused backend is not an error.
+typedef void (*mse_backend_pause_callback_t)(void);
+typedef void (*mse_backend_resume_callback_t)(void);
+// Drops the running content. The backend keeps its allocations and stays ready
+// for the next load_rom; this is not shutdown.
+typedef void (*mse_backend_stop_callback_t)(void);
+typedef libmse_backend_state_t (*mse_backend_state_callback_t)(void);
+
 typedef bool (*mse_backend_init_callback_t)(void);
 typedef void (*mse_backend_shutdown_callback_t)(void);
 typedef void (*mse_backend_start_callback_t)(mse_event_t *stop_event);

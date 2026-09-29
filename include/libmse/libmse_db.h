@@ -31,6 +31,15 @@ LIBMSE_API libmse_db_t *libmse_db_open(const char *path);
 LIBMSE_API void			libmse_db_close(libmse_db_t *db);
 LIBMSE_API bool			libmse_db_exec(const char *sql, libmse_db_t *db);
 
+// Brings a database created by an older build up to the current schema.
+// CREATE TABLE IF NOT EXISTS leaves existing tables alone, so columns added
+// later have to be patched in here. Safe to call on every open.
+LIBMSE_API void			libmse_db_migrate(libmse_db_t *db);
+
+// True when `table` already has `column`. Used by the migration, and by
+// anything that has to work against both shapes.
+LIBMSE_API bool			libmse_db_has_column(libmse_db_t *db, const char *table, const char *column);
+
 // Utility
 LIBMSE_API int64_t libmse_db_last_insert_rowid(libmse_db_t *db);
 

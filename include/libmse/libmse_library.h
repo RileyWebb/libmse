@@ -53,6 +53,24 @@ LIBMSE_API void libmse_library_register_handler(libmse_library_t *lib,
 // Non-blocking asynchronous task pipeline entrypoint
 LIBMSE_API bool libmse_library_add_game(libmse_library_t *lib, const char *rom_path);
 
+// Queues every file under `path` whose extension looks like a ROM, returning
+// how many were queued. Scanning is synchronous, but the scraping it queues is
+// not, so this returns as soon as the walk is done.
+LIBMSE_API size_t libmse_library_add_folder(libmse_library_t *lib, const char *path, bool recursive);
+
+// True when `path` ends in an extension the folder scan recognises.
+LIBMSE_API bool libmse_library_is_rom_path(const char *path);
+
+// Drops entries whose file is no longer on disk. Returns how many went.
+LIBMSE_API size_t libmse_library_forget_missing(libmse_library_t *lib);
+
+// Empties every table. The database file itself is left in place.
+LIBMSE_API bool libmse_library_clear(libmse_library_t *lib);
+
+// Counts for the management UI. Any out pointer may be NULL.
+LIBMSE_API void libmse_library_stats(libmse_library_t *lib, size_t *out_games, size_t *out_files,
+                                     size_t *out_with_art);
+
 LIBMSE_API void libmse_game_meta_cleanup(libmse_game_meta_t *meta);
 
 #ifdef __cplusplus

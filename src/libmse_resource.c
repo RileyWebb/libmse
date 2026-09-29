@@ -5,6 +5,7 @@
 #include <time.h>
 
 #include "libmse/libmse_resource.h"
+#include "libmse/libmse_log.h"
 
 #ifdef _WIN32
 #include <direct.h>
@@ -174,6 +175,39 @@ LIBMSE_API const char *libmse_resource_get_log_path()
         snprintf(libmse_log_path, len, "%s%clogs", appdata_path, LIBMSE_PATH_SEPARATOR);
     }
     return libmse_log_path;
+}
+
+LIBMSE_API const char *libmse_resource_get_autoexec_path()
+{
+    static char *autoexec_path = NULL;
+
+    if (autoexec_path)
+        return autoexec_path;
+
+    if (!appdata_path)
+        libmse_resource_get_appdata_path();
+
+    if (!appdata_path) return NULL;
+
+    const char *name = "autoexec.cfg";
+    size_t      len  = strlen(appdata_path) + 1 + strlen(name) + 1;
+
+    autoexec_path = malloc(len);
+    if (!autoexec_path) return NULL;
+    snprintf(autoexec_path, len, "%s%c%s", appdata_path, LIBMSE_PATH_SEPARATOR, name);
+
+    // Created empty rather than left missing, so there is somewhere obvious to
+    // put startup commands. "a" rather than "w": opening for write would empty
+    // a file the user had already filled in.
+    libmse_resource_ensure_directory_exists(appdata_path);
+    FILE *file = fopen(autoexec_path, "a");
+    if (file) {
+        fclose(file);
+    } else {
+        libmse_logf("Could not create %s", autoexec_path);
+    }
+
+    return autoexec_path;
 }
 
 LIBMSE_API bool libmse_resource_ensure_directory_exists(const char *path) {
