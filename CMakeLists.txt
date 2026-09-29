@@ -32,6 +32,15 @@ target_include_directories(libmse PUBLIC include)
 set_target_properties(libmse PROPERTIES PREFIX "")
 target_compile_definitions(libmse PRIVATE LIBMSE_EXPORTS)
 
+if(NOT WIN32)
+    # pthread_setname_np is a GNU extension that glibc hides behind
+    # _GNU_SOURCE. Without it the call is an implicit declaration -- a warning
+    # on GCC 13, an error from GCC 14 on. Set for the whole target rather than
+    # as a #define in each file, which has to come before every include to work
+    # and silently stops working when someone adds one above it.
+    target_compile_definitions(libmse PRIVATE _GNU_SOURCE)
+endif()
+
 target_include_directories(libmse PUBLIC ${LUA_INCLUDE} ${sqlite3_SOURCE_DIR})
 target_link_libraries(libmse PRIVATE ${PLATFORM_LIBS} SQLite3 stb)
 target_link_libraries(libmse PUBLIC minizip SDL3-shared libluajit pthread)
