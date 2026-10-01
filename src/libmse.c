@@ -9,6 +9,7 @@
 #include <time.h>
 
 #include "compat/unzip.h"
+#include "libmse/libmse_cvar.h"
 #include "libmse/libmse_resource.h"
 #include "libmse/libmse_log.h"
 
@@ -26,6 +27,26 @@
 
 #define MSE_PATH_BUFFER 1024
 #define MSE_COPY_BUFFER 8192
+
+#define MSE_LIBRARY_DB_NAME "mse_library.db"
+
+// Where the game library lives. Empty means the app data directory, which is
+// the only place the application can be sure it may write: installed under
+// Program Files the working directory is not writable, and the library would
+// quietly fail to save.
+//
+// Not beside the ROMs, which was the other candidate. There is no one folder to
+// be beside -- libmse_library_add_folder takes any number of unrelated roots
+// and libmse_library_add_game takes loose files with no folder at all -- and
+// picking one would put the index on a drive that may be a network share or
+// unplugged, taking every other platform's entries with it when it went.
+//
+// Set it if you want the database somewhere else; a portable install on a stick
+// wants it beside the executable. Read when the first backend loads, which is
+// after config.cfg and autoexec.cfg have run, so a value set in either is
+// already in place.
+LIBMSE_CVAR_DEFINE_STRING(g_cv_library_db, "mse_library_db", "",
+                          "Game library database file (empty = app data directory)");
 
 FILE *libmse_log_file;
 
@@ -395,6 +416,73 @@ static bool mse_extract_zip_archive(const char *zip_path, char *out_root, size_t
 	return true;
 }
 
+// Moves a database left in the working directory by an older build, along with
+// whatever write-ahead log it was killed in the middle of. Only ever runs when
+// there is nothing at the destination, so it cannot overwrite a newer library,
+// and a failure is reported rather than worked around -- the old file staying
+// where it is beats half of it arriving somewhere else.
+static void mse_library_db_migrate(const char *destination)
+{
+	static const char *const suffixes[] = {"", "-wal", "-shm"};
+
+	struct stat info;
+	if (stat(MSE_LIBRARY_DB_NAME, &info) != 0) {
+		return; // Nothing to bring across
+	}
+	if (stat(destination, &info) == 0) {
+		return; // Already have one; leave the stale file alone
+	}
+
+	for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); ++i) {
+		char from[MSE_PATH_BUFFER];
+		char to[MSE_PATH_BUFFER];
+
+		snprintf(from, sizeof(from), "%s%s", MSE_LIBRARY_DB_NAME, suffixes[i]);
+		snprintf(to, sizeof(to), "%s%s", destination, suffixes[i]);
+
+		if (stat(from, &info) != 0) {
+			continue; // A clean shutdown leaves no -wal or -shm behind
+		}
+		if (rename(from, to) != 0) {
+			libmse_logf("library: could not move '%s' to '%s': %s", from, to, strerror(errno));
+			return;
+		}
+	}
+
+	libmse_logf("library: moved %s to %s", MSE_LIBRARY_DB_NAME, destination);
+}
+
+// The database file: the cvar if it names one, the app data directory if not.
+// Worked out once, because the path is handed to SQLite and SQLite keeps it --
+// changing the cvar afterwards cannot move an open database, and answering as
+// though it could would be worse than not offering it at all.
+static const char *mse_library_db_path(void)
+{
+	static char resolved[MSE_PATH_BUFFER];
+
+	if (resolved[0] != '\0') {
+		return resolved;
+	}
+
+	if (g_cv_library_db != NULL && *g_cv_library_db != NULL && **g_cv_library_db != '\0') {
+		snprintf(resolved, sizeof(resolved), "%s", *g_cv_library_db);
+		return resolved;
+	}
+
+	const char *appdata = libmse_resource_get_appdata_path();
+	if (appdata == NULL ||
+	    !mse_path_join(resolved, sizeof(resolved), appdata, MSE_LIBRARY_DB_NAME)) {
+		// No profile to write into. The working directory is where this used to
+		// live, so the worst case is what the previous build always did.
+		snprintf(resolved, sizeof(resolved), "%s", MSE_LIBRARY_DB_NAME);
+		return resolved;
+	}
+
+	libmse_resource_ensure_directory_exists(appdata);
+	mse_library_db_migrate(resolved);
+	return resolved;
+}
+
 static bool mse_backend_load_info(void *library_handle, libmse_backend_t *backend)
 {
 	const mse_backend_info_t	*info		  = NULL;
@@ -403,10 +491,16 @@ static bool mse_backend_load_info(void *library_handle, libmse_backend_t *backen
 	mse_backend_frame_callback_t get_frame	  = NULL;
 	const mse_backend_input_desc_t		*inputs		   = NULL;
 	const size_t						*input_count   = NULL;
+	const mse_backend_input_layout_t	*input_layouts = NULL;
+	const mse_backend_controller_desc_t *controller	   = NULL;
 	mse_backend_init_callback_t			 init		   = NULL;
 	mse_backend_shutdown_callback_t		 shutdown	   = NULL;
 	mse_backend_load_rom_callback_t		 load_rom	   = NULL;
 	mse_backend_update_inputs_callback_t update_inputs = NULL;
+	mse_backend_pause_callback_t		 pause_cb	   = NULL;
+	mse_backend_resume_callback_t		 resume_cb	   = NULL;
+	mse_backend_stop_callback_t			 stop_cb	   = NULL;
+	mse_backend_state_callback_t		 state_cb	   = NULL;
 	libmse_library_meta_handler_t		 library_meta_handler = NULL;
 
 	if (library_handle == NULL || backend == NULL) {
@@ -446,6 +540,17 @@ static bool mse_backend_load_info(void *library_handle, libmse_backend_t *backen
 		input_count = (const size_t *)mse_library_symbol(library_handle, "backend_input_count");
 	}
 
+	/* Optional pad diagram. A backend without it still configures fine; the
+	 * frontend just lists its inputs instead of drawing them. */
+	input_layouts = (const mse_backend_input_layout_t *)mse_library_symbol(library_handle, "input_layouts");
+	if (input_layouts == NULL) {
+		input_layouts = (const mse_backend_input_layout_t *)mse_library_symbol(library_handle, "backend_input_layouts");
+	}
+	controller = (const mse_backend_controller_desc_t *)mse_library_symbol(library_handle, "controller_desc");
+	if (controller == NULL) {
+		controller = (const mse_backend_controller_desc_t *)mse_library_symbol(library_handle, "backend_controller_desc");
+	}
+
 	init = (mse_backend_init_callback_t)mse_library_symbol(library_handle, "init");
 	if (init == NULL) {
 		init = (mse_backend_init_callback_t)mse_library_symbol(library_handle, "backend_init");
@@ -465,6 +570,56 @@ static bool mse_backend_load_info(void *library_handle, libmse_backend_t *backen
 	if (update_inputs == NULL) {
 		update_inputs =
 			(mse_backend_update_inputs_callback_t)mse_library_symbol(library_handle, "backend_update_inputs");
+	}
+
+	// Transport control. Looked up under backend_* first: "pause" and "stop"
+	// are ordinary enough names that a plugin could pick one up from a library
+	// it links, and taking the prefixed one first keeps that from happening.
+	pause_cb = (mse_backend_pause_callback_t)mse_library_symbol(library_handle, "backend_pause");
+	if (pause_cb == NULL) {
+		pause_cb = (mse_backend_pause_callback_t)mse_library_symbol(library_handle, "pause");
+	}
+
+	resume_cb = (mse_backend_resume_callback_t)mse_library_symbol(library_handle, "backend_resume");
+	if (resume_cb == NULL) {
+		resume_cb = (mse_backend_resume_callback_t)mse_library_symbol(library_handle, "resume");
+	}
+
+	stop_cb = (mse_backend_stop_callback_t)mse_library_symbol(library_handle, "backend_stop");
+	if (stop_cb == NULL) {
+		stop_cb = (mse_backend_stop_callback_t)mse_library_symbol(library_handle, "stop");
+	}
+
+	state_cb = (mse_backend_state_callback_t)mse_library_symbol(library_handle, "backend_get_state");
+	if (state_cb == NULL) {
+		state_cb = (mse_backend_state_callback_t)mse_library_symbol(library_handle, "get_state");
+	}
+
+	// Required, not optional: the frontend offers pause and stop for every
+	// backend, so one that cannot honour them is rejected here rather than
+	// leaving dead controls in the UI.
+	{
+		const struct {
+			const char *name;
+			const void *fn;
+		} required[] = {
+			{"backend_pause", (const void *)pause_cb},
+			{"backend_resume", (const void *)resume_cb},
+			{"backend_stop", (const void *)stop_cb},
+			{"backend_get_state", (const void *)state_cb},
+		};
+
+		bool complete = true;
+		for (size_t i = 0; i < sizeof(required) / sizeof(required[0]); ++i) {
+			if (required[i].fn == NULL) {
+				libmse_logf("backend '%s' does not export %s, which every backend must provide",
+							info->name ? info->name : "(unnamed)", required[i].name);
+				complete = false;
+			}
+		}
+		if (!complete) {
+			return false;
+		}
 	}
 
 	library_meta_handler = (libmse_library_meta_handler_t)mse_library_symbol(library_handle, "library_meta_handler");
@@ -504,6 +659,12 @@ static bool mse_backend_load_info(void *library_handle, libmse_backend_t *backen
 	backend->shutdown	   = shutdown;
 	backend->load_rom	   = load_rom;
 	backend->update_inputs = update_inputs;
+	backend->input_layouts   = input_layouts;
+	backend->controller_desc = controller;
+	backend->pause		   = pause_cb;
+	backend->resume		   = resume_cb;
+	backend->stop		   = stop_cb;
+	backend->get_state	   = state_cb;
 	backend->metadata_handler = library_meta_handler;
 
 	/* Register any exported file handlers provided by the backend plugin */
@@ -530,7 +691,7 @@ static bool mse_backend_load_info(void *library_handle, libmse_backend_t *backen
 
 
 	//if (!g_temp_db) {
-		g_temp_db = libmse_db_open("mse_library.db");
+		g_temp_db = libmse_db_open(mse_library_db_path());
 		if (g_temp_db) {
 			const char* create_sql = 
                 "-- 1. Companies (e.g., Nintendo)\n"
@@ -559,6 +720,8 @@ static bool mse_backend_load_info(void *library_handle, libmse_backend_t *backen
                 "   clone_of TEXT, "
                 "   release_year INTEGER, "
                 "   artwork_blob BLOB, "
+                "   artwork_mime TEXT, "
+                "   artwork_url TEXT, "
                 "   FOREIGN KEY(platform_id) REFERENCES platforms(id)"
                 ");"
 
@@ -598,6 +761,7 @@ static bool mse_backend_load_info(void *library_handle, libmse_backend_t *backen
                 "   FOREIGN KEY(game_id) REFERENCES games(id)"
                 ");";
 			libmse_db_exec(create_sql, g_temp_db);
+			libmse_db_migrate(g_temp_db);
 			
 			g_temp_lib = libmse_library_create(g_temp_db);
 			//libmse_library_register_handler(g_temp_lib, "nes", library_meta_handler, NULL);
@@ -725,7 +889,11 @@ LIBMSE_API bool mse_backend_init(libmse_backend_t *backend)
 	if (backend == NULL || backend->init == NULL) return true;
 
 	libmse_cmd_register_default();
-	//libmse_cvar_register_default();
+
+	// A backend's declared cvars queued themselves when its library was loaded,
+	// which was after libmse_init flushed. Doing it here rather than at load
+	// means they exist before the backend's own init runs and can read them.
+	libmse_cvar_flush();
 
 	return backend->init();
 }
@@ -763,6 +931,51 @@ LIBMSE_API void mse_backend_update_inputs(libmse_backend_t *backend, const float
 	backend->update_inputs(inputs);
 }
 
+LIBMSE_API bool mse_backend_pause(libmse_backend_t *backend)
+{
+	if (backend == NULL || backend->pause == NULL) {
+		return false;
+	}
+	backend->pause();
+	return true;
+}
+
+LIBMSE_API bool mse_backend_resume(libmse_backend_t *backend)
+{
+	if (backend == NULL || backend->resume == NULL) {
+		return false;
+	}
+	backend->resume();
+	return true;
+}
+
+LIBMSE_API bool mse_backend_stop(libmse_backend_t *backend)
+{
+	if (backend == NULL || backend->stop == NULL) {
+		return false;
+	}
+	backend->stop();
+	return true;
+}
+
+LIBMSE_API libmse_backend_state_t mse_backend_get_state(const libmse_backend_t *backend)
+{
+	if (backend == NULL || backend->get_state == NULL) {
+		return LIBMSE_BACKEND_STOPPED;
+	}
+	return backend->get_state();
+}
+
+LIBMSE_API const char *mse_backend_state_name(libmse_backend_state_t state)
+{
+	switch (state) {
+	case LIBMSE_BACKEND_RUNNING: return "running";
+	case LIBMSE_BACKEND_PAUSED:  return "paused";
+	case LIBMSE_BACKEND_STOPPED:
+	default:                     return "stopped";
+	}
+}
+
 LIBMSE_API bool libmse_init(void)
 {
 	libmse_resource_ensure_directory_exists(libmse_resource_get_appdata_path());
@@ -782,6 +995,15 @@ LIBMSE_API bool libmse_init(void)
 
 	libmse_lua_init();
 	libmse_lua_register_include_dir(libmse_lua_get_default_worker()->L, "cnes/data/lua");
+
+	// Every cvar declared with LIBMSE_CVAR_DEFINE_* queued itself before main;
+	// this is where they become real. Before any config file is read, so a
+	// setting in one lands in a cvar that already knows its own type.
+	const size_t declared = libmse_cvar_flush();
+	if (declared > 0) {
+		libmse_logf("cvar: defined %zu declared cvar(s)", declared);
+	}
+
 	return true;
 }
 

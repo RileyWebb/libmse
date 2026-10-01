@@ -78,6 +78,56 @@ LIBMSE_API bool libmse_db_exec(const char *sql, libmse_db_t *db) {
     return true;
 }
 
+LIBMSE_API bool libmse_db_has_column(libmse_db_t *db, const char *table, const char *column)
+{
+    if (!db || !table || !column) return false;
+
+    char sql[256];
+    snprintf(sql, sizeof(sql), "PRAGMA table_info(%s);", table);
+
+    libmse_stmt_t *stmt = libmse_db_stmt_prepare(db, sql);
+    if (!stmt) return false;
+
+    bool found = false;
+    while (libmse_db_stmt_step(stmt) == 1) {
+        const char *name = libmse_db_col_text(stmt, 1); // 0=cid, 1=name
+        if (name && strcmp(name, column) == 0) {
+            found = true;
+            break;
+        }
+    }
+    libmse_db_stmt_finalize(stmt);
+    return found;
+}
+
+LIBMSE_API void libmse_db_migrate(libmse_db_t *db)
+{
+    if (!db) return;
+
+    // Checked rather than attempted-and-ignored: ALTER TABLE on a column that
+    // is already there is an error, and a migration that logs one on every
+    // launch trains people to ignore the log.
+    static const struct {
+        const char *table;
+        const char *column;
+        const char *type;
+    } columns[] = {
+        {"games", "artwork_mime", "TEXT"},
+        {"games", "artwork_url", "TEXT"},
+    };
+
+    for (size_t i = 0; i < sizeof(columns) / sizeof(columns[0]); ++i) {
+        if (libmse_db_has_column(db, columns[i].table, columns[i].column)) continue;
+
+        char sql[256];
+        snprintf(sql, sizeof(sql), "ALTER TABLE %s ADD COLUMN %s %s;", columns[i].table, columns[i].column,
+                 columns[i].type);
+        if (libmse_db_exec(sql, db)) {
+            libmse_logf("db: added %s.%s", columns[i].table, columns[i].column);
+        }
+    }
+}
+
 LIBMSE_API int64_t libmse_db_last_insert_rowid(libmse_db_t *db) {
     if (!db || !db->handle) return 0;
     

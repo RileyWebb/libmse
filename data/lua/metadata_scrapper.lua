@@ -3,6 +3,7 @@ local ltn12 = require("ltn12")
 local md5 = require("md5")
 local inspect = require("inspect")
 local json = require("json") -- Swapped from cjson to pure-Lua json.lua
+local cover_art = require("cover_art")
 
 -- Helper to extract the full file name with extension from a path
 local function get_filename_with_ext(path)
@@ -22,6 +23,19 @@ local function compute_rom_fingerprints(path)
     
     local file_md5 = string.lower(md5.sumhexa(content))
     return file_md5, size
+end
+
+-- Falls back to the file name when the scraper cannot identify a dump. Strips
+-- the extension and the usual scene decorations so the shelf reads as titles
+-- rather than as filenames.
+local function title_from_filename(path)
+    local name = get_filename_with_ext(path)
+    name = name:gsub("%.[^%.]+$", "")          -- extension
+    name = name:gsub("[_]+", " ")              -- underscores standing in for spaces
+    name = name:gsub("%s+", " ")
+    name = name:gsub("^%s*(.-)%s*$", "%1")
+    if name == "" then return "Unknown" end
+    return name
 end
 
 -- ==========================================
@@ -82,7 +96,7 @@ end
 -- ==========================================
 local function scrape_via_screenscraper(provider_id, auth_user, auth_pass)
     print("[INFRASTRUCTURE] ScreenScraper called with Provider ID: " .. tostring(provider_id))
-    return 0, nil 
+    return 0
 end
 
 -- ==========================================
@@ -90,13 +104,13 @@ end
 -- ==========================================
 local function scrape_via_igdb(provider_id, client_id, client_secret)
     print("[INFRASTRUCTURE] IGDB called with Provider ID: " .. tostring(provider_id))
-    return 0, nil
+    return 0
 end
 
 -- ==========================================
 -- PUBLIC ORCHESTRATION PIPELINE ENTRYPOINT
 -- ==========================================
-function dispatch_async_scrape_request(rom_path, scraper_id, auth_token_a, auth_token_b)
+function dispatch_async_scrape_request(rom_path, scraper_id, auth_token_a, auth_token_b, download_covers)
     local file_md5, file_size = compute_rom_fingerprints(rom_path)
     if not file_md5 then 
         print("[WORKER] Failed to extract physical file parameters from target path: " .. tostring(rom_path))
@@ -110,7 +124,23 @@ function dispatch_async_scrape_request(rom_path, scraper_id, auth_token_a, auth_
     local pm_data = scrape_via_playmatch(rom_path, file_md5, file_size)
     
     if not pm_data or not pm_data.game then
-        print("[WORKER ENGINE] No remote matching updates resolved for: " .. rom_path)
+        -- No match is not a failure to record. The file is on disk and the user
+        -- asked for it, so it goes in the library under its own name; a later
+        -- rescrape can still identify it and fill the rest in.
+        local title = title_from_filename(rom_path)
+        print(string.format("[WORKER ENGINE] No match for '%s', adding it as '%s'", rom_path, title))
+
+        update_game_db_record(
+            rom_path,                  -- 1
+            file_size,                 -- 2
+            file_md5,                  -- 3
+            "local:" .. file_md5,      -- 4  stable id so a rescrape updates this row
+            title,                     -- 5
+            "", "",                    -- 6, 7  platform
+            "", "",                    -- 8, 9  company
+            0,                         -- 10 year
+            nil, nil, nil              -- 11, 12, 13 cover
+        )
         return
     end
 
@@ -128,26 +158,48 @@ function dispatch_async_scrape_request(rom_path, scraper_id, auth_token_a, auth_
 
     -- 3. Enrich the data using the exact IDs PlayMatch gave us
     local final_year = 0
-    local final_artwork = nil
 
     if igdb_id then
-        final_year, final_artwork = scrape_via_igdb(igdb_id, auth_token_a, auth_token_b)
+        final_year = scrape_via_igdb(igdb_id, auth_token_a, auth_token_b)
     elseif ss_id then
-        final_year, final_artwork = scrape_via_screenscraper(ss_id, auth_token_a, auth_token_b)
+        final_year = scrape_via_screenscraper(ss_id, auth_token_a, auth_token_b)
     end
-    
-    print(string.format("[WORKER ENGINE] Committing rich metadata updates for: '%s'", pm_data.game.name))
-    
-    -- FIX 5: Uncomment. Map the table data out into specific native scaler values so `luaL_checkstring(L, 2)` succeeds
-    print(string.format("[WORKER ENGINE] Committing rich metadata updates for: '%s'", pm_data.game.name))
-    
+
     -- Extract platform and company safely, falling back to empty strings if missing
     local p_id   = (pm_data.platform and pm_data.platform.id) or ""
     local p_name = (pm_data.platform and pm_data.platform.name) or ""
     
     local c_id   = (pm_data.company and pm_data.company.id) or ""
     local c_name = (pm_data.company and pm_data.company.name) or ""
-    
+
+    -- 4. Cover art. Wrapped, because this is the one step that reaches out to
+    -- a third-party CDN: a timeout or a malformed response must not cost the
+    -- metadata we already resolved.
+    local art_bytes, art_mime, art_url
+    if download_covers ~= 0 then
+        local ok, b, m, u = pcall(cover_art.fetch, {
+            igdb_id       = igdb_id,
+            client_id     = auth_token_a,
+            client_secret = auth_token_b,
+            platform_name = p_name,
+            game_name     = pm_data.game.name,
+        })
+        if ok then
+            art_bytes, art_mime, art_url = b, m, u
+        else
+            print("[WORKER ENGINE] Cover art lookup errored: " .. tostring(b))
+        end
+    end
+
+    if art_bytes then
+        print(string.format("[WORKER ENGINE] Cover art resolved for '%s' (%d bytes)",
+            pm_data.game.name, #art_bytes))
+    else
+        print(string.format("[WORKER ENGINE] No cover art found for '%s'", pm_data.game.name))
+    end
+
+    print(string.format("[WORKER ENGINE] Committing rich metadata updates for: '%s'", pm_data.game.name))
+
     -- Push the entire normalized relational dataset across the C Bridge
     update_game_db_record(
         rom_path,                          -- 1
@@ -160,6 +212,8 @@ function dispatch_async_scrape_request(rom_path, scraper_id, auth_token_a, auth_
         c_id,                              -- 8
         c_name,                            -- 9
         final_year or 0,                   -- 10
-        final_artwork                      -- 11
+        art_bytes,                         -- 11
+        art_mime,                          -- 12
+        art_url                            -- 13
     )
 end

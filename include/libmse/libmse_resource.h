@@ -38,6 +38,11 @@ LIBMSE_API const char *libmse_resource_get_cache_path();
 LIBMSE_API const char *libmse_resource_get_config_path();
 LIBMSE_API const char *libmse_resource_get_log_path();
 
+// The user's own startup script, in the app data directory, created empty the
+// first time it is asked for. It is theirs: nothing writes to it, so settings
+// put there are not overwritten the way the exported config is.
+LIBMSE_API const char *libmse_resource_get_autoexec_path();
+
 // Hashing
 LIBMSE_API const char *libmse_resource_compute_sha256(libmse_resource_t *resource);
 LIBMSE_API const char *libmse_resource_compute_crc32(libmse_resource_t *resource);

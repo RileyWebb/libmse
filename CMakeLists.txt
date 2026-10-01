@@ -6,6 +6,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 include(cmake/OpenSSL.cmake)
 include(cmake/LuaDeps.cmake)
+include(cmake/Curl.cmake)
 include(cmake/MinizipNG.cmake)
 include(cmake/SQLite3.cmake)
 include(cmake/STB.cmake)
@@ -30,6 +31,15 @@ add_library(libmse SHARED ${LIBMSE_SOURCES})
 target_include_directories(libmse PUBLIC include)
 set_target_properties(libmse PROPERTIES PREFIX "")
 target_compile_definitions(libmse PRIVATE LIBMSE_EXPORTS)
+
+if(NOT WIN32)
+    # pthread_setname_np is a GNU extension that glibc hides behind
+    # _GNU_SOURCE. Without it the call is an implicit declaration -- a warning
+    # on GCC 13, an error from GCC 14 on. Set for the whole target rather than
+    # as a #define in each file, which has to come before every include to work
+    # and silently stops working when someone adds one above it.
+    target_compile_definitions(libmse PRIVATE _GNU_SOURCE)
+endif()
 
 target_include_directories(libmse PUBLIC ${LUA_INCLUDE} ${sqlite3_SOURCE_DIR})
 target_link_libraries(libmse PRIVATE ${PLATFORM_LIBS} SQLite3 stb)
@@ -58,4 +68,16 @@ add_custom_target(libmse_copy_data
     ${CMAKE_CURRENT_SOURCE_DIR}/data/
     ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/data/)
 
-add_dependencies(libmse libmse_copy_data socket_core mime_core)
+add_dependencies(libmse libmse_copy_data socket_core mime_core lcurl_core)
+
+# The cvar system's declared half has no visible failure mode: a declaration
+# that never queues, a flush that never repoints, and a cvar that was never
+# written all look identical from the outside. This exercises each of them.
+add_executable(libmse_cvar_test tests/cvar_test.c)
+target_link_libraries(libmse_cvar_test PRIVATE libmse)
+
+add_test(NAME libmse_cvars COMMAND libmse_cvar_test)
+set_tests_properties(libmse_cvars PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
+    TIMEOUT 30
+    LABELS "libmse;cvar")

@@ -19,6 +19,38 @@ typedef struct mse_backend_input_desc_s {
     } type;
 } mse_backend_input_desc_t;
 
+
+/* -----------------------------------------------------------------------
+ * Controller layout (declared by the backend, drawn by the frontend)
+ *
+ * A backend that wants its own pad drawn rather than a plain list of inputs
+ * exports `controller_desc` and an `input_layouts` array running parallel to
+ * `inputs`. Both are optional: without them the frontend falls back to a list.
+ *
+ * Coordinates are in body units -- the body is `aspect` wide and exactly 1
+ * tall -- so a control with w == h is square whatever the body's proportions.
+ * x and y are the centre of the control.
+ * ---------------------------------------------------------------------- */
+
+typedef enum mse_input_shape_e {
+    MSE_INPUT_SHAPE_NONE = 0, /* not drawn; the input is list-only */
+    MSE_INPUT_SHAPE_RECT,     /* rounded rectangle: shoulder buttons */
+    MSE_INPUT_SHAPE_PILL,     /* fully rounded ends: Select, Start */
+    MSE_INPUT_SHAPE_CIRCLE,   /* round face button */
+    MSE_INPUT_SHAPE_DPAD      /* one arm of a direction cross */
+} mse_input_shape_t;
+
+typedef struct mse_backend_input_layout_s {
+    float    x, y; /* centre, in body units */
+    float    w, h; /* size, in body units */
+    uint32_t shape; /* mse_input_shape_t */
+} mse_backend_input_layout_t;
+
+typedef struct mse_backend_controller_desc_s {
+    const char *name;   /* "NES Controller" */
+    float       aspect; /* body width, with the height taken as 1 */
+} mse_backend_controller_desc_t;
+
 /* -----------------------------------------------------------------------
  * Binding source (set by the frontend / user)
  * ---------------------------------------------------------------------- */

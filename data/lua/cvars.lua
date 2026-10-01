@@ -12,6 +12,9 @@ ffi.cdef[[
         LIBMSE_CVAR_FLOAT,
         LIBMSE_CVAR_DOUBLE,
         LIBMSE_CVAR_STRING,
+        LIBMSE_CVAR_VEC2,
+        LIBMSE_CVAR_VEC3,
+        LIBMSE_CVAR_VEC4,
     } libmse_cvar_type_t;
 
     typedef struct libmse_cvar_s {
@@ -24,12 +27,26 @@ ffi.cdef[[
             float *f;
             double *d;
             const char** s;
+            float *v;
         } data;
 
         char* alloc_s;
 
         libmse_cvar_change_cb cb;
         void* user_data;
+
+        /* Storage the cvar system owns, for a cvar that was defined rather
+           than bound to somebody else's memory. Appended to the end of the
+           struct, so everything above keeps its offset. */
+        union {
+            int i;
+            float f;
+            double d;
+            const char* s;
+            float v[4];
+        } storage;
+
+        bool owned;
     } libmse_cvar_t;
 
     void* libmse_get_cvar_registry();
